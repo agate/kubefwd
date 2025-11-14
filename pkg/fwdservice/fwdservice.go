@@ -77,6 +77,12 @@ type ServiceFWD struct {
 
 	ForwardConfigurationPath string   // file path to IP reservation configuration
 	ForwardIPReservations    []string // cli passed IP reservations
+
+	// Reconnection configuration
+	EnableReconnect   bool
+	ReconnectDelay    int
+	ReconnectMaxDelay int
+	ReconnectBackoff  float64
 }
 
 /*
@@ -322,6 +328,7 @@ func (svcFwd *ServiceFWD) LoopPodsToForward(pods []v1.Pod, includePodNameInHost 
 				PodPort:    podPort,
 				LocalIp:    localIp,
 				LocalPort:  localPort,
+				Timeout:    svcFwd.Timeout,
 				HostFile:   svcFwd.Hostfile,
 				ClusterN:   svcFwd.ClusterN,
 				NamespaceN: svcFwd.NamespaceN,
@@ -329,6 +336,11 @@ func (svcFwd *ServiceFWD) LoopPodsToForward(pods []v1.Pod, includePodNameInHost 
 
 				ManualStopChan: make(chan struct{}),
 				DoneChan:       make(chan struct{}),
+
+				EnableReconnect:   svcFwd.EnableReconnect,
+				ReconnectDelay:    svcFwd.ReconnectDelay,
+				ReconnectMaxDelay: svcFwd.ReconnectMaxDelay,
+				ReconnectBackoff:  svcFwd.ReconnectBackoff,
 			}
 
 			// Fire and forget. The stopping is done in the service.Shutdown() method.
