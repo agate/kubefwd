@@ -60,6 +60,10 @@ var isAllNs bool
 var fwdConfigurationPath string
 var fwdReservations []string
 var timeout int
+var enableReconnect bool
+var reconnectDelay int
+var reconnectMaxDelay int
+var reconnectBackoff float64
 
 func init() {
 	// override error output from k8s.io/apimachinery/pkg/util/runtime
@@ -80,6 +84,10 @@ func init() {
 	Cmd.Flags().StringSliceVarP(&fwdReservations, "reserve", "r", []string{}, "Specify an IP reservation. Specify multiple reservations by duplicating this argument.")
 	Cmd.Flags().StringVarP(&fwdConfigurationPath, "fwd-conf", "z", "", "Define an IP reservation configuration")
 	Cmd.Flags().IntVarP(&timeout, "timeout", "t", 300, "Specify a timeout seconds for the port forwarding.")
+	Cmd.Flags().BoolVar(&enableReconnect, "reconnect", true, "Enable automatic reconnection when port-forward connection is lost.")
+	Cmd.Flags().IntVar(&reconnectDelay, "reconnect-delay", 2, "Initial delay in seconds before reconnecting.")
+	Cmd.Flags().IntVar(&reconnectMaxDelay, "reconnect-max-delay", 60, "Maximum delay in seconds between reconnection attempts.")
+	Cmd.Flags().Float64Var(&reconnectBackoff, "reconnect-backoff", 2.0, "Backoff multiplier for reconnection delay.")
 
 }
 
@@ -451,6 +459,10 @@ func (opts *NamespaceOpts) AddServiceHandler(obj interface{}) {
 		PortMap:                  opts.ParsePortMap(mappings),
 		ForwardConfigurationPath: fwdConfigurationPath,
 		ForwardIPReservations:    fwdReservations,
+		EnableReconnect:          enableReconnect,
+		ReconnectDelay:           reconnectDelay,
+		ReconnectMaxDelay:        reconnectMaxDelay,
+		ReconnectBackoff:         reconnectBackoff,
 	}
 
 	// Add the service to the catalog of services being forwarded
