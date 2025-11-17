@@ -43,46 +43,46 @@ changelog:
       - Merge branch
       - go mod tidy
 
-dockers:
-  -
-    goos: linux
-    goarch: amd64
-    goarm: ''
-    dockerfile: Dockerfile.alpine
-    ids:
-      - kubefwd
-    image_templates:
-      - "txn2/kubefwd:latest"
-      - "txn2/kubefwd:{{ .Tag }}"
-      - "txn2/kubefwd:v{{ .Major }}"
-      - "txn2/kubefwd:amd64-{{ .Tag }}"
-      - "txn2/kubefwd:amd64-v{{ .Major }}"
-      - "txn2/kubefwd:latest_alpine-3"
-      - "txn2/kubefwd:{{ .Tag }}_alpine-3"
-      - "txn2/kubefwd:v{{ .Major }}_alpine-3"
-      - "txn2/kubefwd:amd64-{{ .Tag }}_alpine-3"
-      - "txn2/kubefwd:amd64-v{{ .Major }}_alpine-3"
-    build_flag_templates:
-      - "--label=org.label-schema.schema-version=1.0"
-      - "--label=org.label-schema.version={{.Version}}"
-      - "--label=org.label-schema.name={{.ProjectName}}"
-  -
-    goos: linux
-    goarch: amd64
-    goarm: ''
-    dockerfile: Dockerfile.ubuntu
-    ids:
-      - kubefwd
-    image_templates:
-      - "txn2/kubefwd:latest_ubuntu-20.04"
-      - "txn2/kubefwd:{{ .Tag }}_ubuntu-20.04"
-      - "txn2/kubefwd:v{{ .Major }}_ubuntu-20.04"
-      - "txn2/kubefwd:amd64-{{ .Tag }}_ubuntu-20.04"
-      - "txn2/kubefwd:amd64-v{{ .Major }}_ubuntu-20.04"
-    build_flag_templates:
-      - "--label=org.label-schema.schema-version=1.0"
-      - "--label=org.label-schema.version={{.Version}}"
-      - "--label=org.label-schema.name={{.ProjectName}}"
+# dockers:
+#   -
+#     goos: linux
+#     goarch: amd64
+#     goarm: ''
+#     dockerfile: Dockerfile.alpine
+#     ids:
+#       - kubefwd
+#     image_templates:
+#       - "txn2/kubefwd:latest"
+#       - "txn2/kubefwd:{{ .Tag }}"
+#       - "txn2/kubefwd:v{{ .Major }}"
+#       - "txn2/kubefwd:amd64-{{ .Tag }}"
+#       - "txn2/kubefwd:amd64-v{{ .Major }}"
+#       - "txn2/kubefwd:latest_alpine-3"
+#       - "txn2/kubefwd:{{ .Tag }}_alpine-3"
+#       - "txn2/kubefwd:v{{ .Major }}_alpine-3"
+#       - "txn2/kubefwd:amd64-{{ .Tag }}_alpine-3"
+#       - "txn2/kubefwd:amd64-v{{ .Major }}_alpine-3"
+#     build_flag_templates:
+#       - "--label=org.label-schema.schema-version=1.0"
+#       - "--label=org.label-schema.version={{.Version}}"
+#       - "--label=org.label-schema.name={{.ProjectName}}"
+#   -
+#     goos: linux
+#     goarch: amd64
+#     goarm: ''
+#     dockerfile: Dockerfile.ubuntu
+#     ids:
+#       - kubefwd
+#     image_templates:
+#       - "txn2/kubefwd:latest_ubuntu-20.04"
+#       - "txn2/kubefwd:{{ .Tag }}_ubuntu-20.04"
+#       - "txn2/kubefwd:v{{ .Major }}_ubuntu-20.04"
+#       - "txn2/kubefwd:amd64-{{ .Tag }}_ubuntu-20.04"
+#       - "txn2/kubefwd:amd64-v{{ .Major }}_ubuntu-20.04"
+#     build_flag_templates:
+#       - "--label=org.label-schema.schema-version=1.0"
+#       - "--label=org.label-schema.version={{.Version}}"
+#       - "--label=org.label-schema.name={{.ProjectName}}"
 
 archives:
   - name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}'
@@ -112,24 +112,25 @@ nfpms:
 
 release:
   github:
-    owner: txn2
+    # owner: txn2
+    owner: agate
     name: kubefwd
   name_template: "{{.ProjectName}}-v{{.Version}} {{.Env.USER}}"
 
-brews:
-  - name: kubefwd
-    tap:
-      owner: txn2
-      name: homebrew-tap
-    commit_author:
-      name: Craig Johnston
-      email: cj@imti.co
-    folder: Formula
-    homepage: https://github.com/txn2/kubefwd
-    description: "Kubernetes bulk port forwarding utility."
-    skip_upload: false
-    dependencies:
-      - name: kubectl
-        type: optional
-    test: |-
-      kubefwd version
+# brews:
+#   - name: kubefwd
+#     tap:
+#       owner: txn2
+#       name: homebrew-tap
+#     commit_author:
+#       name: Craig Johnston
+#       email: cj@imti.co
+#     folder: Formula
+#     homepage: https://github.com/txn2/kubefwd
+#     description: "Kubernetes bulk port forwarding utility."
+#     skip_upload: false
+#     dependencies:
+#       - name: kubectl
+#         type: optional
+#     test: |-
+#       kubefwd version
