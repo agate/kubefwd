@@ -3,6 +3,7 @@ package fwdservice
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -77,6 +78,12 @@ type ServiceFWD struct {
 
 	ForwardConfigurationPath string   // file path to IP reservation configuration
 	ForwardIPReservations    []string // cli passed IP reservations
+
+	// Reconnection configuration
+	EnableReconnect   bool
+	ReconnectDelay    int
+	ReconnectMaxDelay int
+	ReconnectBackoff  float64
 }
 
 /*
@@ -138,6 +145,10 @@ func (svcFwd *ServiceFWD) SyncPodForwards(force bool) {
 			return
 		}
 
+		sort.Slice(k8sPods, func(i, j int) bool {
+			return k8sPods[i].CreationTimestamp.After(k8sPods[j].CreationTimestamp.Time)
+		})
+
 		// Check if the pods currently being forwarded still exist in k8s and if
 		// they are not in a (pre-)running state, if not: remove them
 		for _, podName := range svcFwd.ListServicePodNames() {
@@ -158,7 +169,7 @@ func (svcFwd *ServiceFWD) SyncPodForwards(force bool) {
 		// forward first Pod as service name, but also port-forward all pods.
 		if len(k8sPods) != 0 {
 
-			// if this is a headless service forward the first pod from the
+			// if this is a headless service forward the latest pod from the
 			// service name, then subsequent pods from their pod name
 			if svcFwd.Headless {
 				svcFwd.LoopPodsToForward([]v1.Pod{k8sPods[0]}, false)
@@ -189,7 +200,7 @@ func (svcFwd *ServiceFWD) SyncPodForwards(force bool) {
 				}
 			}
 
-			// If no good pod was being forwarded already, start one
+			// If no good pod was being forwarded already, start the newest one
 			if podNameToKeep == "" {
 				svcFwd.LoopPodsToForward([]v1.Pod{k8sPods[0]}, false)
 			}
@@ -322,6 +333,7 @@ func (svcFwd *ServiceFWD) LoopPodsToForward(pods []v1.Pod, includePodNameInHost 
 				PodPort:    podPort,
 				LocalIp:    localIp,
 				LocalPort:  localPort,
+				Timeout:    svcFwd.Timeout,
 				HostFile:   svcFwd.Hostfile,
 				ClusterN:   svcFwd.ClusterN,
 				NamespaceN: svcFwd.NamespaceN,
@@ -329,6 +341,11 @@ func (svcFwd *ServiceFWD) LoopPodsToForward(pods []v1.Pod, includePodNameInHost 
 
 				ManualStopChan: make(chan struct{}),
 				DoneChan:       make(chan struct{}),
+
+				EnableReconnect:   svcFwd.EnableReconnect,
+				ReconnectDelay:    svcFwd.ReconnectDelay,
+				ReconnectMaxDelay: svcFwd.ReconnectMaxDelay,
+				ReconnectBackoff:  svcFwd.ReconnectBackoff,
 			}
 
 			// Fire and forget. The stopping is done in the service.Shutdown() method.

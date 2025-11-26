@@ -63,8 +63,8 @@ type PortForwardOpts struct {
 	LocalIp    net.IP
 	LocalPort  string
 	// Timeout for the port-forwarding process
-	Timeout    int
-	HostFile   *HostFileWithLock
+	Timeout  int
+	HostFile *HostFileWithLock
 
 	// Context is a unique key (string) in kubectl config representing
 	// a user/cluster combination. Kubefwd uses context as the
@@ -89,6 +89,12 @@ type PortForwardOpts struct {
 	Hosts          []string
 	ManualStopChan chan struct{} // Send a signal on this to stop the portforwarding
 	DoneChan       chan struct{} // Listen on this channel for when the shutdown is completed.
+
+	// Reconnection configuration
+	EnableReconnect   bool
+	ReconnectDelay    int
+	ReconnectMaxDelay int
+	ReconnectBackoff  float64
 }
 
 type pingingDialer struct {
@@ -130,9 +136,95 @@ func (p pingingDialer) Dial(protocols ...string) (httpstream.Connection, string,
 // PortForward does the port-forward for a single pod.
 // It is a blocking call and will return when an error occurred
 // or after a cancellation signal has been received.
+// With reconnection enabled, it will automatically retry on recoverable errors.
 func (pfo *PortForwardOpts) PortForward() error {
 	defer close(pfo.DoneChan)
 
+	// Setup initial channels and hosts (done once)
+	downstreamStopChannel := make(chan struct{})
+	pfo.AddHosts()
+
+	// Wait until the stop signal is received from above
+	go func() {
+		<-pfo.ManualStopChan
+		close(downstreamStopChannel)
+		pfo.removeHosts()
+		pfo.removeInterfaceAlias()
+	}()
+
+	// Initialize retry parameters
+	attemptCount := 0
+	currentDelay := time.Duration(pfo.ReconnectDelay) * time.Second
+
+	for {
+		// Check if we should stop before attempting connection
+		select {
+		case <-downstreamStopChannel:
+			log.Debugf("Stop signal received for pod %s, exiting port-forward loop", pfo.PodName)
+			return nil
+		default:
+		}
+
+		attemptCount++
+
+		// Attempt the port forward
+		err := pfo.attemptPortForward(downstreamStopChannel)
+
+		// Check if we should stop after the attempt
+		select {
+		case <-downstreamStopChannel:
+			log.Debugf("Stop signal received for pod %s after port-forward attempt", pfo.PodName)
+			return nil
+		default:
+		}
+
+		// If no error or if reconnection is disabled, return
+		if err == nil {
+			return nil
+		}
+
+		if !pfo.EnableReconnect {
+			return err
+		}
+
+		// Check if the error is recoverable
+		if !isRecoverableError(err) {
+			log.Errorf("Non-recoverable error for pod %s: %s", pfo.PodName, err.Error())
+			return err
+		}
+
+		// Special handling: if the pod is not found, trigger sync to find a new pod
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "not found") && strings.Contains(errMsg, "pod") {
+			log.Warnf("Pod %s no longer exists, triggering sync to find a new pod", pfo.PodName)
+			// Trigger sync to pick up a new pod, then exit this reconnection loop
+			pfo.ServiceFwd.SyncPodForwards(false)
+			return fmt.Errorf("pod %s not found, exiting to allow new pod connection", pfo.PodName)
+		}
+
+		// Log reconnection attempt
+		log.Warnf("Connection lost for pod %s (attempt #%d): %s", pfo.PodName, attemptCount, err.Error())
+		log.Infof("Reconnecting to pod %s in %v...", pfo.PodName, currentDelay)
+
+		// Wait before retry with exponential backoff
+		select {
+		case <-time.After(currentDelay):
+			// Calculate next delay with exponential backoff
+			currentDelay = time.Duration(float64(currentDelay) * pfo.ReconnectBackoff)
+			maxDelay := time.Duration(pfo.ReconnectMaxDelay) * time.Second
+			if currentDelay > maxDelay {
+				currentDelay = maxDelay
+			}
+		case <-downstreamStopChannel:
+			log.Debugf("Stop signal received during reconnection delay for pod %s", pfo.PodName)
+			return nil
+		}
+	}
+}
+
+// attemptPortForward performs a single port-forward attempt.
+// This is the core logic extracted from the original PortForward function.
+func (pfo *PortForwardOpts) attemptPortForward(downstreamStopChannel <-chan struct{}) error {
 	transport, upgrader, err := spdy.RoundTripperFor(&pfo.Config)
 	if err != nil {
 		return err
@@ -154,34 +246,34 @@ func (pfo *PortForwardOpts) PortForward() error {
 		Name(pfo.PodName).
 		SubResource("portforward")
 
-	pfStopChannel := make(chan struct{}, 1)      // Signal that k8s forwarding takes as input for us to signal when to stop
-	downstreamStopChannel := make(chan struct{}) // @TODO: can this be the same as pfStopChannel?
+	pfStopChannel := make(chan struct{}, 1) // Signal that k8s forwarding takes as input for us to signal when to stop
+
+	// Setup stop signal handler for this attempt
+	attemptDone := make(chan struct{})
+	go func() {
+		<-downstreamStopChannel
+		close(pfStopChannel)
+		close(attemptDone)
+	}()
 
 	localNamedEndPoint := fmt.Sprintf("%s:%s", pfo.Service, pfo.LocalPort)
-
-	pfo.AddHosts()
-
-	// Wait until the stop signal is received from above
-	go func() {
-		<-pfo.ManualStopChan
-		close(downstreamStopChannel)
-		pfo.removeHosts()
-		pfo.removeInterfaceAlias()
-		close(pfStopChannel)
-
-	}()
 
 	// Waiting until the pod is running
 	pod, err := pfo.WaitUntilPodRunning(downstreamStopChannel)
 	if err != nil {
-		pfo.Stop()
+		// Check if it's a "not found" error - if so, trigger sync immediately
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "not found") {
+			log.Warnf("Pod %s not found, triggering sync to find a new pod", pfo.PodName)
+			pfo.ServiceFwd.SyncPodForwards(false)
+			return fmt.Errorf("pod %s not found, exiting to allow new pod connection", pfo.PodName)
+		}
 		return err
 	} else if pod == nil {
-		// if err is not nil but pod is nil
-		// mean service deleted but pod is not runnning.
-		// No error, just return
-		pfo.Stop()
-		return nil
+		// if err is nil but pod is nil, the pod is not running/not found
+		log.Warnf("Pod %s not found or not running, triggering sync to find a new pod", pfo.PodName)
+		pfo.ServiceFwd.SyncPodForwards(false)
+		return fmt.Errorf("pod %s not found, exiting to allow new pod connection", pfo.PodName)
 	}
 
 	// Listen for pod is deleted
@@ -207,19 +299,31 @@ func (pfo *PortForwardOpts) PortForward() error {
 
 	fw, err := portforward.NewOnAddresses(dialerWithPing, address, fwdPorts, pfStopChannel, make(chan struct{}), &p, &p)
 	if err != nil {
-		pfo.Stop()
 		return err
 	}
+
+	log.Infof("Port-Forward established: %s:%s to pod %s:%s", pfo.LocalIp.String(), pfo.LocalPort, pfo.PodName, pfo.PodPort)
 
 	// Blocking call
-	if err = fw.ForwardPorts(); err != nil {
-		log.Errorf("ForwardPorts error: %s", err.Error())
-		pfo.Stop()
-		dialerWithPing.stopPing()
+	err = fw.ForwardPorts()
+	dialerWithPing.stopPing()
+
+	// Check if this was a normal stop or an error
+	if err != nil {
+		log.Debugf("ForwardPorts returned error for pod %s: %s", pfo.PodName, err.Error())
 		return err
 	}
 
-	return nil
+	// ForwardPorts returned nil - check if it was due to stop signal
+	select {
+	case <-downstreamStopChannel:
+		log.Debugf("ForwardPorts exited normally due to stop signal for pod %s", pfo.PodName)
+		return nil
+	default:
+		// ForwardPorts exited without error and without stop signal - unexpected
+		log.Warnf("ForwardPorts exited unexpectedly for pod %s without error", pfo.PodName)
+		return fmt.Errorf("port forward exited unexpectedly for pod %s", pfo.PodName)
+	}
 }
 
 //// BuildHostsParams constructs the basic hostnames for the service
@@ -343,6 +447,13 @@ func (pfo *PortForwardOpts) AddHosts() {
 	))
 
 	pfo.addHost(fmt.Sprintf(
+		"%s.%s.svc.%s.cluster.local",
+		pfo.Service,
+		pfo.Namespace,
+		pfo.Context,
+	))
+
+	pfo.addHost(fmt.Sprintf(
 		"%s.%s.svc.cluster.%s",
 		pfo.Service,
 		pfo.Namespace,
@@ -457,17 +568,20 @@ func (pfo *PortForwardOpts) ListenUntilPodDeleted(stopChannel <-chan struct{}, p
 		}
 		switch event.Type {
 		case watch.Modified:
-			log.Warnf("Pod %s modified, service %s pod new status %v", pod.ObjectMeta.Name, pfo.ServiceFwd, pod)
-			if (event.Object.(*v1.Pod)).DeletionTimestamp != nil {
-				log.Warnf("Pod %s marked for deletion, resyncing the %s service pods.", pod.ObjectMeta.Name, pfo.ServiceFwd)
+			modifiedPod := event.Object.(*v1.Pod)
+			log.Debugf("Pod %s modified, phase: %s", modifiedPod.Name, modifiedPod.Status.Phase)
+			if modifiedPod.DeletionTimestamp != nil {
+				log.Warnf("Pod %s marked for deletion, stopping forwarding for this pod.", modifiedPod.Name)
+				// Stop the current pod's port-forward (including its reconnection loop)
+				// SyncPodForwards will create a new PortForwardOpts for the new pod
 				pfo.Stop()
 				pfo.ServiceFwd.SyncPodForwards(false)
 			}
 			//return
 		case watch.Deleted:
-			log.Warnf("Pod %s deleted, resyncing the %s service pods.", pod.ObjectMeta.Name, pfo.ServiceFwd)
-			// TODO - Disconnect / reconnect on the provided port
-			log.Warnf("Pod %s deleted, resyncing the %s service pods.", pod.ObjectMeta.Name, pfo.ServiceFwd)
+			log.Warnf("Pod %s deleted, stopping forwarding for this pod.", pod.ObjectMeta.Name)
+			// Stop the current pod's port-forward (including its reconnection loop)
+			// SyncPodForwards will create a new PortForwardOpts for the new pod
 			pfo.Stop()
 			pfo.ServiceFwd.SyncPodForwards(false)
 		}
@@ -485,4 +599,65 @@ func (pfo *PortForwardOpts) Stop() {
 	default:
 	}
 	close(pfo.ManualStopChan)
+}
+
+// isRecoverableError determines if an error is recoverable and reconnection should be attempted.
+// Returns true for network errors, connection issues, and temporary failures.
+// Returns false for permanent failures like permission denied, invalid configuration, etc.
+func isRecoverableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errMsg := strings.ToLower(err.Error())
+
+	// Recoverable errors (should retry) - check these first as they are more specific
+	recoverablePatterns := []string{
+		"connection refused",
+		"connection reset",
+		"broken pipe",
+		"eof",
+		"timeout",
+		"dial",
+		"network",
+		"unable to upgrade connection",
+		"error upgrading connection",
+		"stream error",
+		"lost connection",
+		"connection closed",
+		"i/o timeout",
+		"no such host",
+		"temporary failure",
+		"sandbox",                      // Pod sandbox errors (e.g., "failed to find sandbox")
+		"error forwarding port",        // Port forwarding errors are usually recoverable
+		"port forward exited",          // Port forward unexpected exit
+		"pod not found or not running", // Pod may come back
+	}
+
+	for _, pattern := range recoverablePatterns {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+
+	// Non-recoverable errors (should not retry)
+	// These are checked after recoverable patterns to avoid false positives
+	nonRecoverablePatterns := []string{
+		"403",
+		"forbidden",
+		"unauthorized",
+		"401",
+		"invalid configuration",
+		"bad request",
+		"400",
+	}
+
+	for _, pattern := range nonRecoverablePatterns {
+		if strings.Contains(errMsg, pattern) {
+			return false
+		}
+	}
+
+	// Default to recoverable for unknown errors to allow retry
+	return true
 }
